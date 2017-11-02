@@ -4,6 +4,8 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security;
 using System.Text;
 using Microsoft.Win32;
 using Shell;
@@ -21,6 +23,7 @@ namespace Wox.Plugin.Program.Programs
         public string ParentDirectory { get; set; }
         public string ExecutableName { get; set; }
         public string Description { get; set; }
+        public bool Valid { get; set; }
 
         private const string ShortcutExtension = "lnk";
         private const string ApplicationReferenceExtension = "appref-ms";
@@ -125,7 +128,8 @@ namespace Wox.Plugin.Program.Programs
                 IcoPath = path,
                 FullPath = path,
                 ParentDirectory = Directory.GetParent(path).FullName,
-                Description = string.Empty
+                Description = string.Empty,
+                Valid = true
             };
             return p;
         }
@@ -133,7 +137,6 @@ namespace Wox.Plugin.Program.Programs
         private static Win32 LnkProgram(string path)
         {
             var program = Win32Program(path);
-
             try
             {
                 var link = new ShellLink();
@@ -144,33 +147,46 @@ namespace Wox.Plugin.Program.Programs
 
                 const int MAX_PATH = 260;
                 StringBuilder buffer = new StringBuilder(MAX_PATH);
-                link.GetDescription(buffer, MAX_PATH);
-                var description = buffer.ToString();
-                if (!string.IsNullOrEmpty(description))
+
+                var data = new _WIN32_FIND_DATAW();
+                const uint SLGP_SHORTPATH = 1;
+                link.GetPath(buffer, buffer.Capacity, ref data, SLGP_SHORTPATH);
+                var target = buffer.ToString();
+                if (!string.IsNullOrEmpty(target))
                 {
-                    program.Description = description;
-                }
-                else
-                {
-                    buffer = new StringBuilder(MAX_PATH);
-                    var data = new _WIN32_FIND_DATAW();
-                    const uint SLGP_SHORTPATH = 1;
-                    link.GetPath(buffer, buffer.Capacity, ref data, SLGP_SHORTPATH);
-                    var target = buffer.ToString();
-                    if (!string.IsNullOrEmpty(target))
+                    var extension = Extension(target);
+                    if (extension == ExeExtension && File.Exists(target))
                     {
-                        var info = FileVersionInfo.GetVersionInfo(target);
-                        if (!string.IsNullOrEmpty(info.FileDescription))
+                        buffer = new StringBuilder(MAX_PATH);
+                        link.GetDescription(buffer, MAX_PATH);
+                        var description = buffer.ToString();
+                        if (!string.IsNullOrEmpty(description))
                         {
-                            program.Description = info.FileDescription;
+                            program.Description = description;
+                        }
+                        else
+                        {
+                            var info = FileVersionInfo.GetVersionInfo(target);
+                            if (!string.IsNullOrEmpty(info.FileDescription))
+                            {
+                                program.Description = info.FileDescription;
+                            }
                         }
                     }
                 }
                 return program;
             }
-            catch (Exception)
+            catch (COMException e)
             {
-                Log.Error($"Error when parsing shortcut: {path}");
+                // C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\MiracastView.lnk always cause exception
+                Log.Exception($"|Win32.LnkProgram|COMException when parsing shortcut <{path}> with HResult <{e.HResult}>", e);
+                program.Valid = false;
+                return program;
+            }
+            catch (Exception e)
+            {
+                Log.Exception($"|Win32.LnkProgram|Exception when parsing shortcut <{path}>", e);
+                program.Valid = false;
                 return program;
             }
         }
@@ -188,17 +204,30 @@ namespace Wox.Plugin.Program.Programs
 
         private static IEnumerable<string> ProgramPaths(string directory, string[] suffixes)
         {
-            if (Directory.Exists(directory))
-            {
-                var files = Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories).Where(
-                    f => suffixes.Contains(Extension(f))
-                );
-                return files;
-            }
-            else
-            {
+            if (!Directory.Exists(directory))
                 return new string[] { };
-            }
+
+            var ds = Directory.GetDirectories(directory);
+
+            var paths = ds.SelectMany(d =>
+            {
+                try
+                {
+                    var paths_for_suffixes = suffixes.SelectMany(s =>
+                    {
+                        var pattern = $"*.{s}";
+                        var ps = Directory.EnumerateFiles(d, pattern, SearchOption.AllDirectories);
+                        return ps;
+                    });
+                    return paths_for_suffixes;
+                }
+                catch (Exception e) when (e is SecurityException || e is UnauthorizedAccessException)
+                {
+                    Log.Exception($"|Program.Win32.ProgramPaths|Don't have permission on <{directory}>", e);
+                    return new List<string>();
+                }
+            });
+            return paths;
         }
 
         private static string Extension(string path)
@@ -237,7 +266,8 @@ namespace Wox.Plugin.Program.Programs
             var paths = paths1.Concat(paths2).ToArray();
             var programs1 = paths.AsParallel().Where(p => Extension(p) == ShortcutExtension).Select(LnkProgram);
             var programs2 = paths.AsParallel().Where(p => Extension(p) == ApplicationReferenceExtension).Select(Win32Program);
-            return programs1.Concat(programs2);
+            var programs = programs1.Concat(programs2).Where(p => p.Valid);
+            return programs;
         }
 
 
@@ -283,7 +313,7 @@ namespace Wox.Plugin.Program.Programs
                     if (!string.IsNullOrEmpty(path))
                     {
                         // fix path like this: ""\"C:\\folder\\executable.exe\""
-                        path = path.Trim('"');
+                        path = path.Trim('"', ' ');
                         path = Environment.ExpandEnvironmentVariables(path);
 
                         if (File.Exists(path))
@@ -292,10 +322,21 @@ namespace Wox.Plugin.Program.Programs
                             entry.ExecutableName = subkey;
                             return entry;
                         }
+                        else
+                        {
+                            return new Win32();
+                        }
+                    }
+                    else
+                    {
+                        return new Win32();
                     }
                 }
+                else
+                {
+                    return new Win32();
+                }
             }
-            return new Win32();
         }
 
         //private static Win32 ScoreFilter(Win32 p)

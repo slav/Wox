@@ -5,13 +5,13 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Text;
+using System.Threading.Tasks;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Xml.Linq;
 using Windows.ApplicationModel;
-using Windows.ApplicationModel.Core;
-using Windows.Foundation;
 using Windows.Management.Deployment;
-using Windows.Storage.Streams;
 using AppxPackaing;
 using Shell;
 using Wox.Infrastructure;
@@ -21,34 +21,31 @@ using Rect = System.Windows.Rect;
 
 namespace Wox.Plugin.Program.Programs
 {
+    [Serializable]
     public class UWP
     {
         public string Name { get; }
         public string FullName { get; }
         public string FamilyName { get; }
-
-        public string DisplayName { get; set; }
-        public string Description { get; set; }
-        public string PublisherDisplayName { get; set; }
         public string Location { get; set; }
 
         public Application[] Apps { get; set; }
-        public Package Package { get; }
+
+        public PackageVersion Version { get; set; }
 
         public UWP(Package package)
         {
-            Package = package;
-            Name = Package.Id.Name;
-            FullName = Package.Id.FullName;
-            FamilyName = Package.Id.FamilyName;
-            Location = Package.InstalledLocation.Path;
 
-            InitializeAppDisplayInfo(package);
+            Location = package.InstalledLocation.Path;
+            Name = package.Id.Name;
+            FullName = package.Id.FullName;
+            FamilyName = package.Id.FamilyName;
             InitializeAppInfo();
             Apps = Apps.Where(a =>
             {
-                var valid = !string.IsNullOrEmpty(a.UserModelId) &&
-                            !string.IsNullOrEmpty(a.DisplayName);
+                var valid =
+                    !string.IsNullOrEmpty(a.UserModelId) &&
+                    !string.IsNullOrEmpty(a.DisplayName);
                 return valid;
             }).ToArray();
         }
@@ -56,66 +53,92 @@ namespace Wox.Plugin.Program.Programs
         private void InitializeAppInfo()
         {
             var path = Path.Combine(Location, "AppxManifest.xml");
-            var appx = new AppxFactory();
+
+            var namespaces = XmlNamespaces(path);
+            InitPackageVersion(namespaces);
+
+            var appxFactory = new AppxFactory();
             IStream stream;
             const uint noAttribute = 0x80;
             const Stgm exclusiveRead = Stgm.Read | Stgm.ShareExclusive;
-            var result = SHCreateStreamOnFileEx(path, exclusiveRead, noAttribute, false, null, out stream);
+            var hResult = SHCreateStreamOnFileEx(path, exclusiveRead, noAttribute, false, null, out stream);
 
-            if (result == Hresult.Ok)
+            if (hResult == Hresult.Ok)
             {
-                var reader = appx.CreateManifestReader(stream);
-
-                var properties = reader.GetProperties();
-                PublisherDisplayName = properties.GetStringValue("PublisherDisplayName");
-                DisplayName = properties.GetStringValue("DisplayName");
-                Description = properties.GetStringValue("Description");
-
-                var apps = reader.GetApplications();
-                int i = 0;
-                while (apps.GetHasCurrent() != 0 && i <= Apps.Length)
+                var reader = appxFactory.CreateManifestReader(stream);
+                var manifestApps = reader.GetApplications();
+                var apps = new List<Application>();
+                while (manifestApps.GetHasCurrent() != 0)
                 {
-                    var currentApp = apps.GetCurrent();
-                    var appListEntry = currentApp.GetStringValue("AppListEntry");
-                    if (appListEntry != "nonoe")
+                    var manifestApp = manifestApps.GetCurrent();
+                    var appListEntry = manifestApp.GetStringValue("AppListEntry");
+                    if (appListEntry != "none")
                     {
-                        Apps[i].UserModelId = currentApp.GetAppUserModelId();
-                        Apps[i].BackgroundColor = currentApp.GetStringValue("BackgroundColor") ?? string.Empty;
-                        Apps[i].LogoPath = Path.Combine(Location, currentApp.GetStringValue("Square44x44Logo"));
-                        Apps[i].Location = Location;
+                        var app = new Application(manifestApp, this);
+                        apps.Add(app);
                     }
-                    apps.MoveNext();
-                    i++;
+                    manifestApps.MoveNext();
                 }
-                if (i != Apps.Length)
-                {
-                    var message = $"Wrong application number - {Name}: {i}";
-                    Console.WriteLine(message);
-                }
+                Apps = apps.Where(a => a.AppListEntry != "none").ToArray();
+            }
+            else
+            {
+                var e = Marshal.GetExceptionForHR((int)hResult);
+                Log.Exception($"|UWP.InitializeAppInfo|SHCreateStreamOnFileEx on path <{path}> failed with HResult <{hResult}> and location <{Location}>.", e);
             }
         }
 
-        private void InitializeAppDisplayInfo(Package package)
+
+
+        /// http://www.hanselman.com/blog/GetNamespacesFromAnXMLDocumentWithXPathDocumentAndLINQToXML.aspx
+        private string[] XmlNamespaces(string path)
         {
-            IReadOnlyList<AppListEntry> apps;
-            try
+            XDocument z = XDocument.Load(path);
+            if (z.Root != null)
             {
-                apps = package.GetAppListEntriesAsync().AsTask().Result;
+                var namespaces = z.Root.Attributes().
+                    Where(a => a.IsNamespaceDeclaration).
+                    GroupBy(
+                        a => a.Name.Namespace == XNamespace.None ? string.Empty : a.Name.LocalName,
+                        a => XNamespace.Get(a.Value)
+                    ).Select(
+                        g => g.First().ToString()
+                    ).ToArray();
+                return namespaces;
             }
-            catch (Exception e)
+            else
             {
-                var message = $"{e.Message} @ {Name}";
-                Console.WriteLine(message);
-                return;
+                Log.Error($"|UWP.XmlNamespaces|can't find namespaces for <{path}>");
+                return new string[] { };
             }
-            Apps = apps.Select(a => new Application
-            {
-                DisplayName = a.DisplayInfo.DisplayName,
-                Description = a.DisplayInfo.Description,
-                // todo: which size is valid?
-                LogoStream = a.DisplayInfo.GetLogo(new Size(44, 44))
-            }).ToArray();
         }
+
+        private void InitPackageVersion(string[] namespaces)
+        {
+            var versionFromNamespace = new Dictionary<string, PackageVersion>
+            {
+                {"http://schemas.microsoft.com/appx/manifest/foundation/windows10", PackageVersion.Windows10},
+                {"http://schemas.microsoft.com/appx/2013/manifest", PackageVersion.Windows81},
+                {"http://schemas.microsoft.com/appx/2010/manifest", PackageVersion.Windows8},
+            };
+
+            foreach (var n in versionFromNamespace.Keys)
+            {
+                if (namespaces.Contains(n))
+                {
+                    Version = versionFromNamespace[n];
+                    return;
+                }
+            }
+
+            Log.Error($"|UWP.InitPackageVersion| Unknown Appmanifest version UWP <{FullName}> with location <{Location}>.");
+            Version = PackageVersion.Unknown;
+        }
+
+
+
+
+
 
         public static Application[] All()
         {
@@ -123,22 +146,21 @@ namespace Wox.Plugin.Program.Programs
             var support = Environment.OSVersion.Version.Major >= windows10.Major;
             if (support)
             {
-                var application = CurrentUserPackages().AsParallel().SelectMany(p =>
+                var applications = CurrentUserPackages().AsParallel().SelectMany(p =>
                 {
+                    UWP u;
                     try
                     {
-                        var u = new UWP(p);
-                        return u.Apps;
+                        u = new UWP(p);
                     }
                     catch (Exception e)
                     {
-                        // if there are errors, just ignore it and continue
-                        var message = $"Can't parse {p.Id.Name}: {e.Message}";
-                        Log.Error(message);
+                        Log.Exception($"|UWP.All|Can't convert Package to UWP for <{p.Id.FullName}>:", e);
                         return new Application[] { };
                     }
-                });
-                return application.ToArray();
+                    return u.Apps;
+                }).ToArray();
+                return applications;
             }
             else
             {
@@ -148,15 +170,31 @@ namespace Wox.Plugin.Program.Programs
 
         private static IEnumerable<Package> CurrentUserPackages()
         {
-            var user = WindowsIdentity.GetCurrent().User;
+            var u = WindowsIdentity.GetCurrent().User;
 
-            if (user != null)
+            if (u != null)
             {
-                var userSecurityId = user.Value;
-                var packageManager = new PackageManager();
-                var packages = packageManager.FindPackagesForUser(userSecurityId);
-                packages = packages.Where(p => !p.IsFramework && !p.IsDevelopmentMode && !string.IsNullOrEmpty(p.InstalledLocation.Path));
-                return packages;
+                var id = u.Value;
+                var m = new PackageManager();
+                var ps = m.FindPackagesForUser(id);
+                ps = ps.Where(p =>
+                {
+                    bool valid;
+                    try
+                    {
+                        var f = p.IsFramework;
+                        var d = p.IsDevelopmentMode;
+                        var path = p.InstalledLocation.Path;
+                        valid = !f && !d && !string.IsNullOrEmpty(path);
+                    }
+                    catch (Exception e)
+                    {
+                        Log.Exception($"|UWP.CurrentUserPackages|Can't get package info for <{p.Id.FullName}>", e);
+                        valid = false;
+                    }
+                    return valid;
+                });
+                return ps;
             }
             else
             {
@@ -187,25 +225,26 @@ namespace Wox.Plugin.Program.Programs
             return FamilyName.GetHashCode();
         }
 
-
+        [Serializable]
         public class Application : IProgram
         {
+            public string AppListEntry { get; set; }
             public string DisplayName { get; set; }
             public string Description { get; set; }
-            public RandomAccessStreamReference LogoStream { get; set; }
             public string UserModelId { get; set; }
-            public string PublisherDisplayName { get; set; }
             public string BackgroundColor { get; set; }
-            public string LogoPath { get; set; }
 
-            public string Location { get; set; }
+            public string LogoUri { get; set; }
+            public string LogoPath { get; set; }
+            public UWP Package { get; set; }
 
             private int Score(string query)
             {
                 var score1 = StringMatcher.Score(DisplayName, query);
                 var score2 = StringMatcher.ScoreForPinyin(DisplayName, query);
                 var score3 = StringMatcher.Score(Description, query);
-                var score = new[] { score1, score2, score3 }.Max();
+                var score4 = StringMatcher.ScoreForPinyin(Description, query);
+                var score = new[] { score1, score2, score3, score4 }.Max();
                 return score;
             }
 
@@ -213,7 +252,7 @@ namespace Wox.Plugin.Program.Programs
             {
                 var result = new Result
                 {
-                    SubTitle = Location,
+                    SubTitle = Package.Location,
                     Icon = Logo,
                     Score = Score(query),
                     ContextData = this,
@@ -249,7 +288,7 @@ namespace Wox.Plugin.Program.Programs
                         Title = api.GetTranslation("wox_plugin_program_open_containing_folder"),
                         Action = _ =>
                         {
-                            var hide = Main.StartProcess(new ProcessStartInfo(Location));
+                            var hide = Main.StartProcess(new ProcessStartInfo(Package.Location));
                             return hide;
                         },
                         IcoPath = "Images/folder.png"
@@ -258,123 +297,258 @@ namespace Wox.Plugin.Program.Programs
                 return contextMenus;
             }
 
-            private void Launch(IPublicAPI api)
+            private async void Launch(IPublicAPI api)
             {
-                try
+                var appManager = new ApplicationActivationManager();
+                uint unusedPid;
+                const string noArgs = "";
+                const ACTIVATEOPTIONS noFlags = ACTIVATEOPTIONS.AO_NONE;
+                await Task.Run(() =>
                 {
-                    var appManager = new ApplicationActivationManager();
-                    uint unusedPid;
-                    const string noArgs = "";
-                    const ACTIVATEOPTIONS noFlags = ACTIVATEOPTIONS.AO_NONE;
-                    appManager.ActivateApplication(UserModelId, noArgs, noFlags, out unusedPid);
+                    try
+                    {
+                        appManager.ActivateApplication(UserModelId, noArgs, noFlags, out unusedPid);
+                    }
+                    catch (Exception)
+                    {
+                        var name = "Plugin: Program";
+                        var message = $"Can't start UWP: {DisplayName}";
+                        api.ShowMsg(name, message, string.Empty);
+                    }
+                });
+            }
+
+            public Application(IAppxManifestApplication manifestApp, UWP package)
+            {
+                UserModelId = manifestApp.GetAppUserModelId();
+                DisplayName = manifestApp.GetStringValue("DisplayName");
+                Description = manifestApp.GetStringValue("Description");
+                BackgroundColor = manifestApp.GetStringValue("BackgroundColor");
+                Package = package;
+
+                DisplayName = ResourceFromPri(package.FullName, DisplayName);
+                Description = ResourceFromPri(package.FullName, Description);
+                LogoUri = LogoUriFromManifest(manifestApp);
+                LogoPath = LogoPathFromUri(LogoUri);
+            }
+
+            internal string ResourceFromPri(string packageFullName, string resourceReference)
+            {
+                const string prefix = "ms-resource:";
+                if (!string.IsNullOrWhiteSpace(resourceReference) && resourceReference.StartsWith(prefix))
+                {
+                    // magic comes from @talynone
+                    // https://github.com/talynone/Wox.Plugin.WindowsUniversalAppLauncher/blob/master/StoreAppLauncher/Helpers/NativeApiHelper.cs#L139-L153
+                    string key = resourceReference.Substring(prefix.Length);
+                    string parsed;
+                    if (key.StartsWith("//"))
+                    {
+                        parsed = prefix + key;
+                    }
+                    else if (key.StartsWith("/"))
+                    {
+                        parsed = prefix + "//" + key;
+                    }
+                    else
+                    {
+                        parsed = prefix + "///resources/" + key;
+                    }
+
+                    var outBuffer = new StringBuilder(128);
+                    string source = $"@{{{packageFullName}? {parsed}}}";
+                    var capacity = (uint)outBuffer.Capacity;
+                    var hResult = SHLoadIndirectString(source, outBuffer, capacity, IntPtr.Zero);
+                    if (hResult == Hresult.Ok)
+                    {
+                        var loaded = outBuffer.ToString();
+                        if (!string.IsNullOrEmpty(loaded))
+                        {
+                            return loaded;
+                        }
+                        else
+                        {
+                            Log.Error($"|UWP.ResourceFromPri|Can't load null or empty result pri <{source}> with uwp location <{Package.Location}>.");
+                            return string.Empty;
+                        }
+                    }
+                    else
+                    {
+                        // https://github.com/Wox-launcher/Wox/issues/964
+                        // known hresult 2147942522:
+                        // 'Microsoft Corporation' violates pattern constraint of '\bms-resource:.{1,256}'.
+                        // for
+                        // Microsoft.MicrosoftOfficeHub_17.7608.23501.0_x64__8wekyb3d8bbwe: ms-resource://Microsoft.MicrosoftOfficeHub/officehubintl/AppManifest_GetOffice_Description
+                        // Microsoft.BingFoodAndDrink_3.0.4.336_x64__8wekyb3d8bbwe: ms-resource:AppDescription
+                        var e = Marshal.GetExceptionForHR((int)hResult);
+                        Log.Exception($"|UWP.ResourceFromPri|Load pri failed <{source}> with HResult <{hResult}> and location <{Package.Location}>.", e);
+                        return string.Empty;
+                    }
                 }
-                catch (Exception)
+                else
                 {
-                    var name = "Plugin: Program";
-                    var message = $"Can't start UWP: {DisplayName}";
-                    api.ShowMsg(name, message, string.Empty);
+                    return resourceReference;
+                }
+            }
+
+
+            internal string LogoUriFromManifest(IAppxManifestApplication app)
+            {
+                var logoKeyFromVersion = new Dictionary<PackageVersion, string>
+            {
+                {PackageVersion.Windows10, "Square44x44Logo"},
+                {PackageVersion.Windows81, "Square30x30Logo"},
+                {PackageVersion.Windows8, "SmallLogo"},
+            };
+                if (logoKeyFromVersion.ContainsKey(Package.Version))
+                {
+                    var key = logoKeyFromVersion[Package.Version];
+                    var logoUri = app.GetStringValue(key);
+                    return logoUri;
+                }
+                else
+                {
+                    return string.Empty;
+                }
+            }
+
+            internal string LogoPathFromUri(string uri)
+            {
+                // all https://msdn.microsoft.com/windows/uwp/controls-and-patterns/tiles-and-notifications-app-assets
+                // windows 10 https://msdn.microsoft.com/en-us/library/windows/apps/dn934817.aspx
+                // windows 8.1 https://msdn.microsoft.com/en-us/library/windows/apps/hh965372.aspx#target_size
+                // windows 8 https://msdn.microsoft.com/en-us/library/windows/apps/br211475.aspx
+
+                string path;
+                if (uri.Contains("\\"))
+                {
+                    path = Path.Combine(Package.Location, uri);
+                }
+                else
+                {
+                    // for C:\Windows\MiracastView etc
+                    path = Path.Combine(Package.Location, "Assets", uri);
+                }
+
+                var extension = Path.GetExtension(path);
+                if (extension != null)
+                {
+                    var end = path.Length - extension.Length;
+                    var prefix = path.Substring(0, end);
+                    var paths = new List<string> { path };
+
+                    // todo hidpi icon
+                    if (Package.Version == PackageVersion.Windows10)
+                    {
+                        paths.Add($"{prefix}.scale-100{extension}");
+                        paths.Add($"{prefix}.scale-200{extension}");
+                    }
+                    else if (Package.Version == PackageVersion.Windows81)
+                    {
+                        paths.Add($"{prefix}.scale-100{extension}");
+                        paths.Add($"{prefix}.scale-120{extension}");
+                        paths.Add($"{prefix}.scale-140{extension}");
+                        paths.Add($"{prefix}.scale-160{extension}");
+                        paths.Add($"{prefix}.scale-180{extension}");
+                    }
+                    else if (Package.Version == PackageVersion.Windows8)
+                    {
+                        paths.Add($"{prefix}.scale-100{extension}");
+                    }
+
+                    var selected = paths.FirstOrDefault(File.Exists);
+                    if (!string.IsNullOrEmpty(selected))
+                    {
+                        return selected;
+                    }
+                    else
+                    {
+                        Log.Error($"|UWP.LogoPathFromUri| <{UserModelId}> can't find logo uri for <{uri}>, Package location <{Package.Location}>.");
+                        return string.Empty;
+                    }
+                }
+                else
+                {
+                    Log.Error($"|UWP.LogoPathFromUri| <{UserModelId}> cantains can't find extension for <{uri}> Package location <{Package.Location}>.");
+                    return string.Empty;
                 }
             }
 
 
             public ImageSource Logo()
             {
-                var logo = !string.IsNullOrEmpty(LogoPath) ? ImageFromPath(LogoPath) : ImageFromStream(LogoStream);
-
-                var validBaground = !string.IsNullOrEmpty(BackgroundColor) && BackgroundColor != "transparent";
-                var plated = validBaground ? PlatedImage(logo) : logo;
+                var logo = ImageFromPath(LogoPath);
+                var plated = PlatedImage(logo);
 
                 // todo magic! temp fix for cross thread object
                 plated.Freeze();
                 return plated;
             }
 
+
             private BitmapImage ImageFromPath(string path)
             {
-                // https://msdn.microsoft.com/windows/uwp/controls-and-patterns/tiles-and-notifications-app-assets
-                var extension = path.Substring(path.Length - 4);
-                var filename = path.Substring(0, path.Length - 4);
-                // todo: remove hard cod scale
-                var path1 = $"{filename}.scale-200{extension}";
-                var path2 = $"{filename}.scale-100{extension}";
-                if (File.Exists(path1))
+                if (File.Exists(path))
                 {
-                    var image = new BitmapImage(new Uri(path1));
-                    return image;
-                }
-                else if (File.Exists(path2))
-                {
-                    var image = new BitmapImage(new Uri(path2));
+                    var image = new BitmapImage(new Uri(path));
                     return image;
                 }
                 else
                 {
+                    Log.Error($"|UWP.ImageFromPath|Can't get logo for <{UserModelId}> with path <{path}> and location <{Package.Location}>");
                     return new BitmapImage(new Uri(Constant.ErrorIcon));
                 }
-            }
-
-            private BitmapImage ImageFromStream(RandomAccessStreamReference reference)
-            {
-                IRandomAccessStreamWithContentType stream;
-                try
-                {
-                    stream = reference.OpenReadAsync().AsTask().Result;
-                }
-                catch (Exception e)
-                {
-                    var message = $"{e.Message} @ {DisplayName}";
-                    Log.Error(message);
-                    throw;
-                }
-
-                var image = new BitmapImage();
-                image.BeginInit();
-                image.StreamSource = stream.AsStream();
-                image.EndInit();
-                return image;
             }
 
             private ImageSource PlatedImage(BitmapImage image)
             {
-                var width = image.Width;
-                var height = image.Height;
-                var x = 0;
-                var y = 0;
-
-                var group = new DrawingGroup();
-
-                var converted = ColorConverter.ConvertFromString(BackgroundColor);
-                if (converted != null)
+                if (!string.IsNullOrEmpty(BackgroundColor) && BackgroundColor != "transparent")
                 {
-                    var color = (Color)converted;
-                    var brush = new SolidColorBrush(color);
-                    var pen = new Pen(brush, 1);
-                    var backgroundArea = new Rect(0, 0, width, width);
-                    var rectabgle = new RectangleGeometry(backgroundArea);
-                    var rectDrawing = new GeometryDrawing(brush, pen, rectabgle);
-                    group.Children.Add(rectDrawing);
+                    var width = image.Width;
+                    var height = image.Height;
+                    var x = 0;
+                    var y = 0;
 
-                    var imageArea = new Rect(x, y, image.Width, image.Height);
-                    var imageDrawing = new ImageDrawing(image, imageArea);
-                    group.Children.Add(imageDrawing);
+                    var group = new DrawingGroup();
 
-                    // http://stackoverflow.com/questions/6676072/get-system-drawing-bitmap-of-a-wpf-area-using-visualbrush
-                    var visual = new DrawingVisual();
-                    var context = visual.RenderOpen();
-                    context.DrawDrawing(group);
-                    context.Close();
-                    const int dpiScale100 = 96;
-                    var bitmap = new RenderTargetBitmap(
-                        Convert.ToInt32(width), Convert.ToInt32(height),
-                        dpiScale100, dpiScale100,
-                        PixelFormats.Pbgra32
-                    );
-                    bitmap.Render(visual);
-                    return bitmap;
+                    var converted = ColorConverter.ConvertFromString(BackgroundColor);
+                    if (converted != null)
+                    {
+                        var color = (Color)converted;
+                        var brush = new SolidColorBrush(color);
+                        var pen = new Pen(brush, 1);
+                        var backgroundArea = new Rect(0, 0, width, width);
+                        var rectabgle = new RectangleGeometry(backgroundArea);
+                        var rectDrawing = new GeometryDrawing(brush, pen, rectabgle);
+                        group.Children.Add(rectDrawing);
+
+                        var imageArea = new Rect(x, y, image.Width, image.Height);
+                        var imageDrawing = new ImageDrawing(image, imageArea);
+                        group.Children.Add(imageDrawing);
+
+                        // http://stackoverflow.com/questions/6676072/get-system-drawing-bitmap-of-a-wpf-area-using-visualbrush
+                        var visual = new DrawingVisual();
+                        var context = visual.RenderOpen();
+                        context.DrawDrawing(group);
+                        context.Close();
+                        const int dpiScale100 = 96;
+                        var bitmap = new RenderTargetBitmap(
+                            Convert.ToInt32(width), Convert.ToInt32(height),
+                            dpiScale100, dpiScale100,
+                            PixelFormats.Pbgra32
+                        );
+                        bitmap.Render(visual);
+                        return bitmap;
+                    }
+                    else
+                    {
+                        Log.Error($"|UWP.PlatedImage| Can't convert background string <{BackgroundColor}> to color for <{Package.Location}>.");
+                        return new BitmapImage(new Uri(Constant.ErrorIcon));
+                    }
                 }
                 else
                 {
-                    return new BitmapImage(new Uri(Constant.ErrorIcon));
+                    // todo use windows theme as background
+                    return image;
                 }
             }
 
@@ -384,19 +558,32 @@ namespace Wox.Plugin.Program.Programs
             }
         }
 
+        public enum PackageVersion
+        {
+            Windows10,
+            Windows81,
+            Windows8,
+            Unknown
+        }
+
         [Flags]
         private enum Stgm : uint
         {
             Read = 0x0,
-            ShareExclusive = 0x10
+            ShareExclusive = 0x10,
         }
 
         private enum Hresult : uint
         {
-            Ok = 0x0000
+            Ok = 0x0000,
         }
 
         [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
-        private static extern Hresult SHCreateStreamOnFileEx(string fileName, Stgm grfMode, uint attributes, bool create, IStream reserved, out IStream stream);
+        private static extern Hresult SHCreateStreamOnFileEx(string fileName, Stgm grfMode, uint attributes, bool create,
+            IStream reserved, out IStream stream);
+
+        [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+        private static extern Hresult SHLoadIndirectString(string pszSource, StringBuilder pszOutBuf, uint cchOutBuf,
+            IntPtr ppvReserved);
     }
 }

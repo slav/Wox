@@ -33,50 +33,56 @@ namespace Wox.Core.Plugin
 
             foreach (var metadata in metadatas)
             {
+                var milliseconds = Stopwatch.Debug($"|PluginsLoader.CSharpPlugins|Constructor init cost for {metadata.Name}", () =>
+                {
+
 #if DEBUG
-                var assembly = Assembly.Load(AssemblyName.GetAssemblyName(metadata.ExecuteFilePath));
-                var types = assembly.GetTypes();
-                var type = types.First(o => o.IsClass && !o.IsAbstract && o.GetInterfaces().Contains(typeof(IPlugin)));
-                var plugin = (IPlugin)Activator.CreateInstance(type);
+                    var assembly = Assembly.Load(AssemblyName.GetAssemblyName(metadata.ExecuteFilePath));
+                    var types = assembly.GetTypes();
+                    var type = types.First(o => o.IsClass && !o.IsAbstract && o.GetInterfaces().Contains(typeof(IPlugin)));
+                    var plugin = (IPlugin)Activator.CreateInstance(type);
 #else
-                Assembly assembly;
-                try
-                {
-                    assembly = Assembly.Load(AssemblyName.GetAssemblyName(metadata.ExecuteFilePath));
-                }
-                catch (Exception e)
-                {
-                    Log.Exception(new WoxPluginException(metadata.Name, "Couldn't load assembly", e));
-                    continue;
-                }
-                var types = assembly.GetTypes();
-                Type type;
-                try
-                {
-                    type = types.First(o => o.IsClass && !o.IsAbstract && o.GetInterfaces().Contains(typeof(IPlugin)));
-                }
-                catch (InvalidOperationException e)
-                {
-                    Log.Exception(new WoxPluginException(metadata.Name, "Can't find class implement IPlugin", e));
-                    continue;
-                }
-                IPlugin plugin;
-                try
-                {
-                    plugin = (IPlugin)Activator.CreateInstance(type);
-                }
-                catch (Exception e)
-                {
-                    Log.Exception(new WoxPluginException(metadata.Name, "Can't create instance", e));
-                    continue;
-                }
+                    Assembly assembly;
+                    try
+                    {
+                        assembly = Assembly.Load(AssemblyName.GetAssemblyName(metadata.ExecuteFilePath));
+                    }
+                    catch (Exception e)
+                    {
+                        Log.Exception($"|PluginsLoader.CSharpPlugins|Couldn't load assembly for {metadata.Name}", e);
+                        return;
+                    }
+                    var types = assembly.GetTypes();
+                    Type type;
+                    try
+                    {
+                        type = types.First(o => o.IsClass && !o.IsAbstract && o.GetInterfaces().Contains(typeof(IPlugin)));
+                    }
+                    catch (InvalidOperationException e)
+                    {
+                        Log.Exception($"|PluginsLoader.CSharpPlugins|Can't find class implement IPlugin for <{metadata.Name}>", e);
+                        return;
+                    }
+                    IPlugin plugin;
+                    try
+                    {
+                        plugin = (IPlugin)Activator.CreateInstance(type);
+                    }
+                    catch (Exception e)
+                    {
+                        Log.Exception($"|PluginsLoader.CSharpPlugins|Can't create instance for <{metadata.Name}>", e);
+                        return;
+                    }
 #endif
-                PluginPair pair = new PluginPair
-                {
-                    Plugin = plugin,
-                    Metadata = metadata
-                };
-                plugins.Add(pair);
+                    PluginPair pair = new PluginPair
+                    {
+                        Plugin = plugin,
+                        Metadata = metadata
+                    };
+                    plugins.Add(pair);
+                });
+                metadata.InitTime += milliseconds;
+
             }
             return plugins;
         }
@@ -98,13 +104,13 @@ namespace Wox.Core.Plugin
                     }
                     else
                     {
-                        Log.Exception(new WoxException("Python can't be found in PATH."));
+                        Log.Error("|PluginsLoader.PythonPlugins|Python can't be found in PATH.");
                         return new List<PluginPair>();
                     }
                 }
                 else
                 {
-                    Log.Exception(new WoxException("Path variable is not set."));
+                    Log.Error("|PluginsLoader.PythonPlugins|PATH environment variable is not set.");
                     return new List<PluginPair>();
                 }
             }
@@ -117,7 +123,7 @@ namespace Wox.Core.Plugin
                 }
                 else
                 {
-                    Log.Exception(new WoxException("Can't find python executable in python directory"));
+                    Log.Error("|PluginsLoader.PythonPlugins|Can't find python executable in <b ");
                     return new List<PluginPair>();
                 }
             }

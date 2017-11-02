@@ -4,14 +4,18 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media.Animation;
 using System.Windows.Controls;
+using System.Windows.Forms;
 using Wox.Core.Plugin;
 using Wox.Core.Resource;
 using Wox.Helper;
 using Wox.Infrastructure.UserSettings;
 using Wox.ViewModel;
 using Screen = System.Windows.Forms.Screen;
-using ContextMenu = System.Windows.Forms.ContextMenu;
-using MenuItem = System.Windows.Forms.MenuItem;
+using ContextMenuStrip = System.Windows.Forms.ContextMenuStrip;
+using DataFormats = System.Windows.DataFormats;
+using DragEventArgs = System.Windows.DragEventArgs;
+using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+using MessageBox = System.Windows.MessageBox;
 using NotifyIcon = System.Windows.Forms.NotifyIcon;
 
 namespace Wox
@@ -55,9 +59,14 @@ namespace Wox
 
         private void OnLoaded(object sender, RoutedEventArgs _)
         {
+            // todo is there a way to set blur only once?
+            ThemeManager.Instance.SetBlurForWindow();
             WindowsInteropHelper.DisableControlBox(this);
-            ThemeManager.Instance.ChangeTheme(_settings.Theme);
             InitProgressbarAnimation();
+            InitializePosition();
+            // since the default main window visibility is visible
+            // so we need set focus during startup
+            QueryTextBox.Focus();
 
             _viewModel.PropertyChanged += (o, e) =>
             {
@@ -69,10 +78,10 @@ namespace Wox
                         Activate();
                         QueryTextBox.Focus();
                         _settings.ActivateTimes++;
-                        if (_viewModel.QueryTextSelected)
+                        if (!_viewModel.LastQuerySelected)
                         {
                             QueryTextBox.SelectAll();
-                            _viewModel.QueryTextSelected = false;
+                            _viewModel.LastQuerySelected = true;
                         }
                     }
                     else if (Visibility == Visibility.Hidden)
@@ -81,23 +90,51 @@ namespace Wox
                     }
                 }
             };
-            // since the default main window visibility is visible
-            // so we need set focus during startup
-            QueryTextBox.Focus();
+            InitializePosition();
+        }
+
+        private void InitializePosition()
+        {
+            Top = WindowTop();
+            Left = WindowLeft();
+            _settings.WindowTop = Top;
+            _settings.WindowLeft = Left;
         }
 
         private void InitializeNotifyIcon()
         {
-            _notifyIcon = new NotifyIcon { Text = Infrastructure.Constant.Wox, Icon = Properties.Resources.app, Visible = true };
-            _notifyIcon.Click += (o, e) => Visibility = Visibility.Visible;
-            var open = new MenuItem(InternationalizationManager.Instance.GetTranslation("iconTrayOpen"));
+            _notifyIcon = new NotifyIcon
+            {
+                Text = Infrastructure.Constant.Wox,
+                Icon = Properties.Resources.app,
+                Visible = true
+            };
+            var menu = new ContextMenuStrip();
+            var items = menu.Items;
+
+            var open = items.Add(InternationalizationManager.Instance.GetTranslation("iconTrayOpen"));
             open.Click += (o, e) => Visibility = Visibility.Visible;
-            var setting = new MenuItem(InternationalizationManager.Instance.GetTranslation("iconTraySettings"));
+            var setting = items.Add(InternationalizationManager.Instance.GetTranslation("iconTraySettings"));
             setting.Click += (o, e) => App.API.OpenSettingDialog();
-            var exit = new MenuItem(InternationalizationManager.Instance.GetTranslation("iconTrayExit"));
+            var exit = items.Add(InternationalizationManager.Instance.GetTranslation("iconTrayExit"));
             exit.Click += (o, e) => Close();
-            MenuItem[] childen = { open, setting, exit };
-            _notifyIcon.ContextMenu = new ContextMenu(childen);
+
+            _notifyIcon.ContextMenuStrip = menu;
+            _notifyIcon.MouseClick += (o, e) =>
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    if (menu.Visible)
+                    {
+                        menu.Close();
+                    }
+                    else
+                    {
+                        var p = System.Windows.Forms.Cursor.Position;
+                        menu.Show(p);
+                    }
+                }
+            };
         }
 
         private void InitProgressbarAnimation()
@@ -249,6 +286,16 @@ namespace Wox
                 _viewModel.SelectPrevItemCommand.Execute(null);
                 e.Handled = true;
             }
+            else if (e.Key == Key.PageDown)
+            {
+                _viewModel.SelectNextPageCommand.Execute(null);
+                e.Handled = true;
+            }
+            else if (e.Key == Key.PageUp)
+            {
+                _viewModel.SelectPrevPageCommand.Execute(null);
+                e.Handled = true;
+            }
         }
 
         private void OnTextChanged(object sender, TextChangedEventArgs e)
@@ -259,5 +306,7 @@ namespace Wox
                 _viewModel.QueryTextCursorMovedToEnd = false;
             }
         }
+
+
     }
 }

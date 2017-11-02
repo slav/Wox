@@ -1,12 +1,16 @@
 ﻿using System;
-using System.Diagnostics;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Linq;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
+using System.Windows;
+using JetBrains.Annotations;
 using Squirrel;
+using Newtonsoft.Json;
+using Wox.Core.Resource;
+using Wox.Infrastructure;
 using Wox.Infrastructure.Http;
 using Wox.Infrastructure.Logger;
 
@@ -14,101 +18,103 @@ namespace Wox.Core
 {
     public static class Updater
     {
-        [Conditional("RELEASE")]
-        public static async void UpdateApp()
-        {
+        private static readonly Internationalization Translater = InternationalizationManager.Instance;
 
-            var client = new WebClient {Proxy = Http.WebProxy()};
-            var downloader = new FileDownloader(client);
+        public static async Task UpdateApp()
+        {
+            UpdateManager m;
+            UpdateInfo u;
 
             try
             {
-                // todo 5/9 the return value of UpdateApp() is NULL, fucking useless!
-                using (
-                    var updater =
-                        await UpdateManager.GitHubUpdateManager(Infrastructure.Constant.Github, urlDownloader: downloader))
-                {
-                    await updater.UpdateApp();
-                }
+                m = await GitHubUpdateManager(Constant.Repository);
             }
-            catch (HttpRequestException he)
+            catch (Exception e) when (e is HttpRequestException || e is WebException || e is SocketException)
             {
-                Log.Exception(he);
+                Log.Exception($"|Updater.UpdateApp|Please check your connection and proxy settings to api.github.com.", e);
+                return;
             }
-            catch (WebException we)
-            {
-                Log.Exception(we);
-            }
-            catch (SocketException sc)
-            {
-                Log.Info("Socket exception happened!, which method cause this exception??");
-                Log.Exception(sc);
-            }
-            catch (Exception exception)
-            {
-                const string info = "Update.exe not found, not a Squirrel-installed app?";
-                if (exception.Message == info)
-                {
-                    Log.Warn(info);
-                }
-                else
-                {
-                    throw;
-                }
-            }
-        }
 
-
-        public static async Task<string> NewVersion()
-        {
-            const string githubAPI = @"https://api.github.com/repos/wox-launcher/wox/releases/latest";
-
-            string response;
             try
             {
-                response = await Http.Get(githubAPI);
+                // UpdateApp CheckForUpdate will return value only if the app is squirrel installed
+                u = await m.CheckForUpdate().NonNull();
             }
-            catch (WebException e)
+            catch (Exception e) when (e is HttpRequestException || e is WebException || e is SocketException)
             {
-                Log.Warn("Can't connect to github api to check new version");
-                Log.Exception(e);
-                return string.Empty;
+                Log.Exception($"|Updater.UpdateApp|Check your connection and proxy settings to api.github.com.", e);
+                m.Dispose();
+                return;
             }
 
-            if (!string.IsNullOrEmpty(response))
+            var fr = u.FutureReleaseEntry;
+            var cr = u.CurrentlyInstalledVersion;
+            Log.Info($"|Updater.UpdateApp|Future Release <{fr.Formatted()}>");
+            if (fr.Version > cr.Version)
             {
-                JContainer json;
                 try
                 {
-                    json = (JContainer)JsonConvert.DeserializeObject(response);
+                    await m.DownloadReleases(u.ReleasesToApply);
                 }
-                catch (JsonSerializationException e)
+                catch (Exception e) when (e is HttpRequestException || e is WebException || e is SocketException)
                 {
-                    Log.Exception(e);
-                    return string.Empty;
+                    Log.Exception($"|Updater.UpdateApp|Check your connection and proxy settings to github-cloud.s3.amazonaws.com.", e);
+                    m.Dispose();
+                    return;
                 }
-                var version = json?["tag_name"]?.ToString();
-                if (!string.IsNullOrEmpty(version))
-                {
-                    return version;
-                }
-                else
-                {
-                    Log.Warn("Can't find tag_name from Github API response");
-                    return string.Empty;
-                }
+
+                await m.ApplyReleases(u);
+                await m.CreateUninstallerRegistryEntry();
+
+                var newVersionTips = Translater.GetTranslation("newVersionTips");
+                newVersionTips = string.Format(newVersionTips, fr.Version);
+                MessageBox.Show(newVersionTips);
+                Log.Info($"|Updater.UpdateApp|Update succeed:{newVersionTips}");
             }
-            else
-            {
-                Log.Warn("Can't get response from Github API");
-                return string.Empty;
-            }
+            
+            // always dispose UpdateManager
+            m.Dispose();
         }
 
-        public static int NumericVersion(string version)
+        [UsedImplicitly]
+        private class GithubRelease
         {
-            var newVersion = version.Replace("v", ".").Replace(".", "").Replace("*", "");
-            return int.Parse(newVersion);
+            [JsonProperty("prerelease")]
+            public bool Prerelease { get; [UsedImplicitly] set; }
+
+            [JsonProperty("published_at")]
+            public DateTime PublishedAt { get; [UsedImplicitly] set; }
+
+            [JsonProperty("html_url")]
+            public string HtmlUrl { get; [UsedImplicitly] set; }
         }
+
+        /// https://github.com/Squirrel/Squirrel.Windows/blob/master/src/Squirrel/UpdateManager.Factory.cs
+        private static async Task<UpdateManager> GitHubUpdateManager(string repository)
+        {
+            var uri = new Uri(repository);
+            var api = $"https://api.github.com/repos{uri.AbsolutePath}/releases";
+
+            var json = await Http.Get(api);
+
+            var releases = JsonConvert.DeserializeObject<List<GithubRelease>>(json);
+            var latest = releases.Where(r => !r.Prerelease).OrderByDescending(r => r.PublishedAt).First();
+            var latestUrl = latest.HtmlUrl.Replace("/tag/", "/download/");
+
+            var client = new WebClient { Proxy = Http.WebProxy() };
+            var downloader = new FileDownloader(client);
+
+            var manager = new UpdateManager(latestUrl, urlDownloader: downloader);
+
+            return manager;
+        }
+
+        public static string NewVersinoTips(string version)
+        {
+            var translater = InternationalizationManager.Instance;
+            var tips = string.Format(translater.GetTranslation("newVersionTips"), version);
+            return tips;
+        }
+
     }
 }
