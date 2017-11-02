@@ -63,7 +63,7 @@ namespace Wox
             ThemeManager.Instance.SetBlurForWindow();
             WindowsInteropHelper.DisableControlBox(this);
             InitProgressbarAnimation();
-            InitializePosition();
+            SetWindowPosition();
             // since the default main window visibility is visible
             // so we need set focus during startup
             QueryTextBox.Focus();
@@ -74,7 +74,6 @@ namespace Wox
                 {
                     if (Visibility == Visibility.Visible)
                     {
-                        SetWindowPosition();
                         Activate();
                         QueryTextBox.Focus();
                         _settings.ActivateTimes++;
@@ -90,7 +89,6 @@ namespace Wox
                     }
                 }
             };
-            InitializePosition();
         }
 
         private void InitializePosition()
@@ -249,6 +247,7 @@ namespace Wox
             {
                 this._settings.WindowTop = this.Top;
                 this._settings.WindowLeft = this.Left;
+                //_viewModel.Save();
             }
         }
 

@@ -53,7 +53,8 @@ namespace Wox.Infrastructure.UserSettings
 
         [JsonConverter(typeof(StringEnumConverter))]
         public LastQueryMode LastQueryMode { get; set; } = LastQueryMode.Selected;
-		
+
+        [JsonIgnore]
         public Action Save = ()=> {};
     }
 

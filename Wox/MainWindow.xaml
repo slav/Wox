@@ -23,7 +23,6 @@
         LocationChanged="OnLocationChanged"
         Deactivated="OnDeactivated"
         PreviewKeyDown="OnKeyDown"
-        LocationChanged="OnLocationChanged"
         Visibility="{Binding MainWindowVisibility, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
         d:DataContext="{d:DesignInstance vm:MainViewModel}">
     <Window.InputBindings>
